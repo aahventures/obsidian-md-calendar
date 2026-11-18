@@ -332,3 +332,15 @@ test('arrow keys roll a custom window by weeks instead of jumping months', () =>
   r.moveSelection(-49);
   assert.equal(v.gridStart, '2027-01-17');
 });
+
+test('agenda mini calendar shares the six-week window and rolls with the selection', () => {
+  const { r, v } = windowRenderer({ view: 'agenda' });
+  r.openAt('2027-01-24', v);
+  assert.deepEqual({ ...r.monthWindow() }, { from: '2027-01-24', to: '2027-03-06', custom: true });
+  v.anchor = '2027-03-06';
+  r.moveSelection(1);
+  assert.equal(v.gridStart, '2027-01-31');
+  const week = windowRenderer({ view: 'week', gridStart: '2027-01-24', anchor: '2027-03-06' });
+  week.r.moveSelection(1); // week view never rolls a month window
+  assert.equal(week.v.gridStart, '2027-01-24');
+});
