@@ -35,12 +35,10 @@ const { EditorState } = require('@codemirror/state');
  * both fit; past this point the grid stops being usable, so the note keeps its scrollbar
  * instead of the calendar being crushed. */
 const MIN_FILL = 340;
-/* Full-pane month on desktop: the weeks share the height equally. A row never goes below
- * MONTH_ROW_MIN (the day number plus one line — keep in step with styles.css; below it the
- * month scrolls), and never gets taller than MONTH_ROW_MAX_RATIO times its own width — on a
- * tall, narrow pane (a vertical monitor) the calendar ends early instead of stretching the days
- * into thin columns. */
-const MONTH_ROW_MIN = 44;
+/* Full-pane month on desktop: the weeks share the height equally, down to the floor in
+ * styles.css (below it the month scrolls), and a week never gets taller than
+ * MONTH_ROW_MAX_RATIO times a day's width — on a tall, narrow pane (a vertical monitor) the
+ * calendar ends early instead of stretching the days into thin columns. */
 const MONTH_ROW_MAX_RATIO = 1;
 
 
@@ -215,7 +213,7 @@ const STRINGS = {
     s_dayEnd: 'Day ends at (hour)',
     s_hoursDesc: 'The hours normally on screen in week and day. The grid widens by itself to fit anything outside them.',
     s_monthChips: 'Events per day in month view',
-    s_monthChipsDesc: 'Beyond this, the day shows “+N more”, which lists the rest without leaving the month. Higher values make the rows taller.',
+    s_monthChipsDesc: 'Beyond this, the day shows “+N more”, which lists the rest without leaving the month. Higher values make the rows taller. In a full-pane month on desktop the rows share the pane instead, and a day shows what fits, up to this many.',
     s_multi: 'Multiple calendars',
     s_multiDesc: 'On — the button creates a new calendar every time. Off — one calendar, the button opens it.',
     s_status: 'Next event in the status bar',
@@ -385,7 +383,7 @@ const STRINGS = {
     s_dayEnd: 'Конец дня (час)',
     s_hoursDesc: 'Часы, которые обычно видно в неделе и дне. Для событий вне этого окна сетка раздвигается сама.',
     s_monthChips: 'Событий в дне в виде «Месяц»',
-    s_monthChipsDesc: 'Дальше день показывает «ещё N» — список остальных открывается на месте, не уводя из месяца. Чем больше значение, тем выше строки.',
+    s_monthChipsDesc: 'Дальше день показывает «ещё N» — список остальных открывается на месте, не уводя из месяца. Чем больше значение, тем выше строки. В месяце во всё окно на ПК строки делят панель поровну, и день показывает столько, сколько помещается, но не больше этого числа.',
     s_multi: 'Несколько календарей',
     s_multiDesc: 'Вкл — кнопка каждый раз создаёт новый календарь. Выкл — календарь один, кнопка открывает его.',
     s_status: 'Ближайшее событие в строке состояния',
@@ -1701,7 +1699,7 @@ class CalendarRenderer {
     const blockBottom = tr.bottom - sr.top + scroller.scrollTop + foot;
     const delta = Math.round(viewBottom - blockBottom - after);
     const height = this.el.getBoundingClientRect().height;
-    const next = Math.min(Math.max(MIN_FILL, Math.round(height + delta)), this._monthFillCap(height));
+    const next = Math.max(MIN_FILL, Math.min(Math.round(height + delta), this._monthFillCap(height)));
     if (Math.abs(next - height) <= 1) return;
     if (next === Math.round(parseFloat(this.el.style.getPropertyValue('--dn-fill')) || 0)) return;
     this.el.style.setProperty('--dn-fill', next + 'px');
@@ -1716,10 +1714,14 @@ class CalendarRenderer {
     const grid = this.el.querySelector('.dn-month.is-fit');
     const cell = grid && grid.querySelector('.dn-day');
     if (!cell || !grid.clientHeight) return Infinity;
-    const weeks = grid.querySelectorAll(':scope > .dn-mweek').length;
+    const weeks = grid.querySelectorAll(':scope > .dn-mweek');
     const gap = parseFloat(getComputedStyle(grid).rowGap) || 0;
-    const rowMax = Math.max(MONTH_ROW_MIN, cell.getBoundingClientRect().width * MONTH_ROW_MAX_RATIO);
-    return Math.round(height - grid.clientHeight + weeks * rowMax + (weeks - 1) * gap);
+    const square = cell.getBoundingClientRect().width * MONTH_ROW_MAX_RATIO;
+    let rows = 0;
+    // Each week's floor comes from styles.css (it grows with the week's multi-day lanes); a week
+    // may always be at least that tall, whatever its width.
+    for (const w of weeks) rows += Math.max(parseFloat(getComputedStyle(w).minHeight) || 0, square);
+    return Math.round(height - grid.clientHeight + rows + (weeks.length - 1) * gap);
   }
 
   /* The block as the note's flow sees it: walk out to whatever sits directly in the note's own
@@ -1808,6 +1810,15 @@ class CalendarRenderer {
     }
 
     if (!v.pending && hadGridFocus && this._gridEl) this._gridEl.focus({ preventScroll: true });
+
+    // _applyFullBleed() above ran its first fit against the PREVIOUS view's DOM — it has to run
+    // first, so renderMonth sees .is-full — and the month's row cap depends on which view is
+    // up. Fit again now that the new one is built, or switching month ↔ week on a capped pane
+    // keeps the old height until the pane is resized.
+    if (this.el.hasClass('is-full')) {
+      const pane = this.el.closest('.view-content');
+      if (pane) this._fillHeight(pane, 0);
+    }
 
     // While picking the placement day, arrow keys drive the cursor over the calendar itself. Keep
     // keyboard focus anchored inside this calendar (desktop) so the scoped key handler fires and we
@@ -2621,36 +2632,60 @@ class CalendarRenderer {
   }
 
   /* Fitted month: in each day, show the events its row has room for and count the rest in
-   * "+N more". Starts from everything the cap allows and hides from the end until the chips
-   * box (which shrinks to the room left under the day number and any multi-day lanes) no
-   * longer overflows. */
+   * "+N more". Measured in batches — reset everything, read every box once, then write —
+   * rather than hiding a chip and re-reading per step, which reflowed the month hundreds of
+   * times per resize frame. Titles get two lines when there is room for every chip the cap
+   * allows; a day the ROOM limits drops to one line each, which fits more of them. */
   _fitMonthChips(grid) {
+    const days = [];
     for (const box of grid.querySelectorAll('.dn-day-chips')) {
       const more = box.querySelector(':scope > .dn-more');
       if (!more || !more._dnItems) continue;
-      const chips = box.querySelectorAll(':scope > .dn-chip');
-      const total = more._dnItems.length;
-      let shown = chips.length;
-      const sync = () => {
-        more._dnShown = shown;
-        const hidden = total - shown;
-        more.style.display = hidden ? '' : 'none';
-        if (hidden) more.setText(t('more', hidden));
-      };
-      const fit = () => {
-        shown = chips.length;
-        chips.forEach((c) => c.style.removeProperty('display'));
-        sync();
-        while (shown > 0 && box.scrollHeight > box.clientHeight + 1) {
-          chips[--shown].style.display = 'none';
-          sync();
-        }
-      };
-      // Titles get two lines when there is room for everything; a day that can't show it all
-      // drops to one line each, which fits more of them.
-      box.removeClass('is-tight');
-      fit();
-      if (shown < total) { box.addClass('is-tight'); fit(); }
+      days.push({ box, more, chips: [...box.querySelectorAll(':scope > .dn-chip')], total: more._dnItems.length });
+    }
+    if (!days.length) return;
+    const gap = parseFloat(getComputedStyle(days[0].box).rowGap) || 0;
+    // How many chips fit: chips plus their gaps, plus "+N more" and its gap if any are left over.
+    const count = (d) => {
+      const room = d.box.clientHeight + 1;
+      const moreH = d.more.offsetHeight;
+      let used = 0;
+      for (let n = d.chips.length; n >= 0; n--) {
+        used = 0;
+        for (let i = 0; i < n; i++) used += d.chips[i].offsetHeight + (i ? gap : 0);
+        if (n < d.total) used += (n ? gap : 0) + moreH;
+        if (used <= room) return n;
+      }
+      return 0;
+    };
+    // Write: everything visible at two lines, "+N more" showing (with a stand-in count) so it
+    // has a height to read.
+    for (const d of days) {
+      d.box.removeClass('is-tight');
+      d.chips.forEach((c) => c.style.removeProperty('display'));
+      d.more.style.removeProperty('display');
+      d.more.setText(t('more', d.total));
+    }
+    // Read.
+    for (const d of days) d.shown = count(d);
+    // A day short of room (not of cap) tries one-line titles: write, then read again.
+    const tight = days.filter((d) => d.shown < d.chips.length);
+    for (const d of tight) d.box.addClass('is-tight');
+    for (const d of tight) d.shown = count(d);
+    // Write the result.
+    for (const d of days) {
+      d.chips.forEach((c, i) => { if (i >= d.shown) c.style.display = 'none'; });
+      d.more._dnShown = d.shown;
+      const hidden = d.total - d.shown;
+      if (hidden) d.more.setText(t('more', hidden)); else d.more.style.display = 'none';
+    }
+    // A keyboard-selected item now behind "+N more" can't be shown or acted on in place: drop
+    // back to day level (it is still one click away in the "+N more" list).
+    const v = this.view();
+    const row = typeof v.selItem === 'number' ? (this._daySel || [])[v.selItem] : null;
+    if (row && row.el && row.el.style.display === 'none') {
+      row.el.removeClass('is-item-sel');
+      v.selItem = null;
     }
   }
 
