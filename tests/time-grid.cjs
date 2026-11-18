@@ -14,8 +14,8 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8') +
-  '\nthis.api = { normalizeCal, serializeCal, configuredHours, normalizeZoom, parseAddTitle, timeScrollOffset, parseTimeRange, timeInputValidator, expandInstances, CalendarRenderer };', sandbox);
-const { normalizeCal, serializeCal, configuredHours, normalizeZoom, parseAddTitle, timeScrollOffset, parseTimeRange, timeInputValidator, expandInstances, CalendarRenderer } = sandbox.api;
+  '\nthis.api = { normalizeCal, serializeCal, configuredHours, normalizeZoom, parseAddTitle, timeScrollOffset, parseTimeRange, timeInputValidator, expandInstances, CalendarRenderer, rangeLabel };', sandbox);
+const { normalizeCal, serializeCal, configuredHours, normalizeZoom, parseAddTitle, timeScrollOffset, parseTimeRange, timeInputValidator, expandInstances, CalendarRenderer, rangeLabel } = sandbox.api;
 const defaults = { firstView: 'month', dayStart: 7, dayEnd: 22 };
 
 test('block hours survive saving, including midnight and end of day', () => {
@@ -277,4 +277,58 @@ test('optimized expansion retains overdue tasks and ordinary/multi-day date boun
   assert.equal(expandInstances({...task,done:true},'2026-09-20','2026-09-20').length, 0);
   assert.equal(expandInstances({...task,task:false},'2026-09-20','2026-09-20').length, 0);
   assert.equal(expandInstances({id:'span',date:'2026-09-19',endDate:'2026-09-21'},'2026-09-20','2026-09-20').length, 1);
+});
+
+test('calendar start date survives saving; invalid dates are dropped', () => {
+  const kept = normalizeCal({ settings: { startAt: '2027-01-24' }, events: [] }, defaults);
+  assert.equal(kept.settings.startAt, '2027-01-24');
+  assert.equal(JSON.parse(serializeCal(kept)).settings.startAt, '2027-01-24');
+  for (const bad of ['2027-02-30', '24/01/2027', 20270124, '']) {
+    assert.equal(Object.hasOwn(normalizeCal({ settings: { startAt: bad } }, defaults).settings, 'startAt'), false, String(bad));
+  }
+});
+
+// Month window logic on a bare renderer: only view state and render() are touched.
+function windowRenderer(state) {
+  const v = Object.assign({ view: 'month', anchor: '2027-01-27', gridStart: null, selItem: null }, state);
+  const r = Object.create(CalendarRenderer.prototype);
+  r.view = () => v;
+  r.renders = 0;
+  r.render = () => { r.renders++; };
+  return { r, v };
+}
+
+test('month window: month-aligned by default, any six weeks once set', () => {
+  const { r, v } = windowRenderer();
+  assert.deepEqual({ ...r.monthWindow() }, { from: '2026-12-27', to: '2027-02-06', custom: false });
+  r.openAt('2027-01-24', v);
+  assert.deepEqual({ ...r.monthWindow() }, { from: '2027-01-24', to: '2027-03-06', custom: true });
+  assert.equal(rangeLabel('2027-01-24', '2027-03-06'), '24 Jan – 6 Mar 2027');
+  assert.equal(rangeLabel('2026-12-27', '2027-02-06'), '27 Dec 2026 – 6 Feb 2027');
+});
+
+test('month window: a selection outside it falls back to month-aligned', () => {
+  const { r, v } = windowRenderer({ gridStart: '2027-01-24', anchor: '2027-04-10' });
+  assert.equal(r.monthWindow().custom, false);
+  assert.equal(v.gridStart, null);
+});
+
+test('stepWeek moves the window a week and takes the selection along only when left behind', () => {
+  const { r, v } = windowRenderer({ anchor: '2027-01-27' });
+  r.stepWeek(1); // from the month-aligned Dec 27 window
+  assert.equal(v.gridStart, '2027-01-03');
+  assert.equal(v.anchor, '2027-01-27');
+  const left = windowRenderer({ gridStart: '2027-01-24', anchor: '2027-01-25' });
+  left.r.stepWeek(1);
+  assert.equal(left.v.gridStart, '2027-01-31');
+  assert.equal(left.v.anchor, '2027-02-01');
+});
+
+test('arrow keys roll a custom window by weeks instead of jumping months', () => {
+  const { r, v } = windowRenderer({ gridStart: '2027-01-24', anchor: '2027-03-06' });
+  r.moveSelection(1);
+  assert.equal(v.anchor, '2027-03-07');
+  assert.equal(v.gridStart, '2027-01-31');
+  r.moveSelection(-49);
+  assert.equal(v.gridStart, '2027-01-17');
 });

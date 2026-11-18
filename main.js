@@ -62,6 +62,9 @@ const STRINGS = {
     today: 'Today',
     prev: 'Previous',
     next: 'Next',
+    shiftWeek: 'Shift-click or [ ]: by a week',
+    startAt: 'Opens at',
+    startAtDesc: 'The date this calendar opens on; empty opens on today. In month view the six weeks start with that week.',
     timePlaceholder: 'time — e.g. 1530, or 15-18 for a range',
     invalidTime: 'Enter a valid time, e.g. 09:30 or 09:30–10:30. Start and end must differ.',
     v_month: 'Month',
@@ -232,6 +235,9 @@ const STRINGS = {
     today: 'Сегодня',
     prev: 'Назад',
     next: 'Вперёд',
+    shiftWeek: 'Shift+клик или [ ]: на неделю',
+    startAt: 'Открывается на',
+    startAtDesc: 'Дата, на которой открывается календарь; пусто — сегодня. В месяце шесть недель начинаются с этой недели.',
     timePlaceholder: 'время — напр. 1530 или 15-18 для диапазона',
     invalidTime: 'Введите время, например 09:30 или 09:30–10:30. Начало и конец должны различаться.',
     v_month: 'Месяц',
@@ -828,6 +834,9 @@ function normalizeCal(parsed, defaults) {
     showCompleted: rawSettings.showCompleted !== false,
   };
   if (!VIEW_CYCLE.includes(settings.view)) settings.view = 'month';
+  // The date the calendar opens on (CalendarSettingsModal). Absent = today.
+  if (typeof rawSettings.startAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawSettings.startAt)
+    && moment(rawSettings.startAt, 'YYYY-MM-DD', true).isValid()) settings.startAt = rawSettings.startAt;
   for (const [key, min, max] of [['dayStart', 0, 23], ['dayEnd', 1, 24]]) {
     if (Number.isInteger(rawSettings[key]) && rawSettings[key] >= min && rawSettings[key] <= max) {
       settings[key] = rawSettings[key];
@@ -1086,6 +1095,13 @@ function periodLabel(view, anchorM) {
   return cap(a.format('MMMM YYYY'));
 }
 
+// A month grid stepped off its month (any six weeks): "24 Jan – 6 Mar 2027".
+function rangeLabel(fromIso, toIso) {
+  const s = moment(fromIso, 'YYYY-MM-DD'), e = moment(toIso, 'YYYY-MM-DD');
+  if (s.year() !== e.year()) return cap(s.format('D MMM YYYY')) + ' – ' + cap(e.format('D MMM YYYY'));
+  return cap(s.format('D MMM')) + ' – ' + cap(e.format('D MMM YYYY'));
+}
+
 function navStep(view, anchorM, dir) {
   const a = moment(anchorM);
   if (view === 'day') return a.add(dir, 'day');
@@ -1187,7 +1203,7 @@ const VIEW_STATES = new Map();
 function viewState(key) {
   let v = VIEW_STATES.get(key);
   if (!v) {
-    v = { view: null, seeded: false, showCompleted: true, anchor: isoToday(), selItem: null, addDraft: '', focusAddUntil: 0 };
+    v = { view: null, seeded: false, showCompleted: true, anchor: isoToday(), gridStart: null, selItem: null, addDraft: '', focusAddUntil: 0 };
     VIEW_STATES.set(key, v);
   }
   return v;
@@ -1287,6 +1303,9 @@ class CalendarRenderer {
       v.showCompleted = (typeof mem.showCompleted === 'boolean')
         ? mem.showCompleted
         : this.model.settings.showCompleted !== false;
+      // A calendar with a start date opens there, the month's six weeks starting with its week.
+      // Only when first seen this session: after that it stays wherever it was left.
+      if (this.model.settings.startAt) this.openAt(this.model.settings.startAt, v);
     }
     if (!v.view) v.view = this.model.settings.view || 'month';
     // Mobile shows only agenda + day. The coercion is EPHEMERAL, so opening the note on a
@@ -1877,15 +1896,25 @@ class CalendarRenderer {
     // wildly between views («Июль 2026» vs «29 Июня – 5 Июля 2026»), so anything sharing
     // its row would jump on every view switch — and the block's top-right corner stays
     // free for Obsidian's own edit-block button.
-    const periodEl = head.createDiv({ cls: 'dn-period', text: periodLabel(v.view, moment(v.anchor, 'YYYY-MM-DD')), attr: { role: 'button', tabindex: '0', 'aria-label': t('goToDate') } });
+    const win = v.view === 'month' ? this.monthWindow() : null;
+    const period = win && win.custom ? rangeLabel(win.from, win.to) : periodLabel(v.view, moment(v.anchor, 'YYYY-MM-DD'));
+    const periodEl = head.createDiv({ cls: 'dn-period', text: period, attr: { role: 'button', tabindex: '0', 'aria-label': t('goToDate') } });
     periodEl.addEventListener('click', () => this.openGoToDate());
     periodEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.openGoToDate(); } });
 
     const nav = head.createDiv({ cls: 'dn-nav' });
-    this.iconBtn(nav, 'chevron-left', t('prev'), () => { v.anchor = navStep(v.view, moment(v.anchor, 'YYYY-MM-DD'), -1).format('YYYY-MM-DD'); this.render(); });
+    // Month view: Shift-click steps the six weeks by a week instead of a month.
+    const step = (dir) => (e) => {
+      if (v.view === 'month' && e && e.shiftKey) { this.stepWeek(dir); return; }
+      v.gridStart = null;
+      v.anchor = navStep(v.view, moment(v.anchor, 'YYYY-MM-DD'), dir).format('YYYY-MM-DD');
+      this.render();
+    };
+    const hint = v.view === 'month' ? ' · ' + t('shiftWeek') : '';
+    this.iconBtn(nav, 'chevron-left', t('prev') + hint, step(-1));
     const todayBtn = nav.createEl('button', { cls: 'dn-today', text: t('today') });
     todayBtn.addEventListener('click', () => this.goToday());
-    this.iconBtn(nav, 'chevron-right', t('next'), () => { v.anchor = navStep(v.view, moment(v.anchor, 'YYYY-MM-DD'), 1).format('YYYY-MM-DD'); this.render(); });
+    this.iconBtn(nav, 'chevron-right', t('next') + hint, step(1));
 
     // A sibling of .dn-nav, not nested inside .dn-head-right: on a narrow pane the two need to
     // share the first wrapped row while the icon buttons below follow together on a row of
@@ -2060,8 +2089,8 @@ class CalendarRenderer {
     const next = moment(v.pending.cursor || v.anchor || isoToday(), 'YYYY-MM-DD').add(days, 'day').format('YYYY-MM-DD');
     v.pending.cursor = next;
     v.pending.dom = moment(next, 'YYYY-MM-DD').date(); // remember the intended day-of-month for month paging
-    const r = rangeForView(v.view, moment(v.anchor, 'YYYY-MM-DD'));
-    if (next < r.from || next > r.to) v.anchor = next; // keep the cursor visible
+    const r = v.view === 'month' ? this.monthWindow() : rangeForView(v.view, moment(v.anchor, 'YYYY-MM-DD'));
+    if (next < r.from || next > r.to) { this._keepInWindow(v, next); v.anchor = next; } // keep the cursor visible
     this.render();
   }
 
@@ -2075,6 +2104,7 @@ class CalendarRenderer {
     m.date(Math.min(dom, m.daysInMonth())); // clamp to short months, but restore e.g. the 31st later
     const next = m.format('YYYY-MM-DD');
     v.pending.cursor = next;
+    v.gridStart = null; // month paging is month-aligned again
     v.anchor = next;
     this.render();
   }
@@ -2204,6 +2234,7 @@ class CalendarRenderer {
       else if (k === 'ArrowDown' || code === 'KeyS') { if (timeGrid) this.moveSelSlot(1); else this.moveSelection(7); }
       else if (code === 'KeyQ') this.switchView(-1);
       else if (code === 'KeyE') this.switchView(1);
+      else if (!timeGrid && v.view === 'month' && (k === '[' || k === ']')) this.stepWeek(k === '[' ? -1 : 1);
       else if (k === 'PageUp') this.shiftSelectionMonth(e.shiftKey ? -12 : -1);
       else if (k === 'PageDown') this.shiftSelectionMonth(e.shiftKey ? 12 : 1);
       else if (k === 'Home' || k === 'End') {
@@ -2400,10 +2431,57 @@ class CalendarRenderer {
   /* ‹Today› / the T key: the pointer jumps to today and the per-view state returns to its
    * defaults — day-of-month paging memory cleared, the week/day slot cursor back on the
    * all-day band — and the grid takes focus so the keys work immediately. */
+  /* Put the calendar on `iso`, with the month grid's six weeks starting at its week. */
+  openAt(iso, v) {
+    v.anchor = iso;
+    v.selDom = moment(iso, 'YYYY-MM-DD').date();
+    v.gridStart = weekStart(moment(iso, 'YYYY-MM-DD')).format('YYYY-MM-DD');
+  }
+
+  /* The six weeks the month grid shows. Normally month-aligned: the week holding the 1st comes
+   * first. Stepped by a week ([ ], Shift-click on ‹ ›) or opened at a calendar's start date, it
+   * is any six weeks, from v.gridStart. That window holds only while the selected day is in it;
+   * month paging, Today and Go to date clear it, and arrow keys roll it a week at a time. */
+  monthWindow() {
+    const v = this.view();
+    if (v.gridStart) {
+      const to = moment(v.gridStart, 'YYYY-MM-DD').add(41, 'day').format('YYYY-MM-DD');
+      if (v.anchor >= v.gridStart && v.anchor <= to) return { from: v.gridStart, to, custom: true };
+      v.gridStart = null;
+    }
+    return Object.assign(rangeForView('month', moment(v.anchor, 'YYYY-MM-DD')), { custom: false });
+  }
+
+  /* A day moved off the edge of a custom window rolls the window by whole weeks to follow it,
+   * rather than jumping to that day's month. */
+  _keepInWindow(v, iso) {
+    if (v.view !== 'month' || !v.gridStart) return;
+    const s = moment(v.gridStart, 'YYYY-MM-DD');
+    while (iso < s.format('YYYY-MM-DD')) s.subtract(7, 'day');
+    while (iso > moment(s).add(41, 'day').format('YYYY-MM-DD')) s.add(7, 'day');
+    v.gridStart = s.format('YYYY-MM-DD');
+  }
+
+  /* Month view, [ / ] or Shift-click on ‹ ›: move the six weeks by one week. The selected day
+   * goes along when the window would leave it behind. */
+  stepWeek(dir) {
+    const v = this.view();
+    const w = this.monthWindow();
+    v.gridStart = moment(w.from, 'YYYY-MM-DD').add(dir * 7, 'day').format('YYYY-MM-DD');
+    const to = moment(v.gridStart, 'YYYY-MM-DD').add(41, 'day').format('YYYY-MM-DD');
+    if (v.anchor < v.gridStart || v.anchor > to) {
+      v.anchor = moment(v.anchor, 'YYYY-MM-DD').add(dir * 7, 'day').format('YYYY-MM-DD');
+      v.selDom = moment(v.anchor, 'YYYY-MM-DD').date();
+    }
+    v.selItem = null;
+    this.render();
+  }
+
   goToday() {
     this._forceTimeScroll = true;
     this._revealMonthSel = true; // today may be in a week scrolled out of a short month
     const v = this.view();
+    v.gridStart = null;
     v.anchor = isoToday();
     v.selDom = null;
     v.selSlot = null;
@@ -2418,6 +2496,7 @@ class CalendarRenderer {
     if (!iso) return;
     this._forceTimeScroll = true;
     const v = this.view();
+    v.gridStart = null;
     v.anchor = iso;
     v.selDom = moment(iso, 'YYYY-MM-DD').date();
     v.selSlot = null;
@@ -2451,9 +2530,12 @@ class CalendarRenderer {
     const anchorM = moment(v.anchor, 'YYYY-MM-DD');
     // Month and agenda copy the MONTH, not the 6-week grid on screen: the neighbouring-month
     // cells are padding, and nobody means them by "this month".
-    const range = (v.view === 'month' || v.view === 'agenda')
-      ? { from: moment(anchorM).startOf('month').format('YYYY-MM-DD'), to: moment(anchorM).endOf('month').format('YYYY-MM-DD') }
-      : rangeForView(v.view, anchorM);
+    // A month stepped off its month copies the six weeks on screen — that IS the period then.
+    const win = v.view === 'month' ? this.monthWindow() : null;
+    const range = win && win.custom ? { from: win.from, to: win.to }
+      : (v.view === 'month' || v.view === 'agenda')
+        ? { from: moment(anchorM).startOf('month').format('YYYY-MM-DD'), to: moment(anchorM).endOf('month').format('YYYY-MM-DD') }
+        : rangeForView(v.view, anchorM);
     const items = this.itemsInRange(range.from, range.to);
 
     const byDay = new Map();
@@ -2517,6 +2599,7 @@ class CalendarRenderer {
     const v = this.view();
     this._revealMonthSel = true; // a keyboard move: keep its target on screen
     v.anchor = moment(v.anchor || isoToday(), 'YYYY-MM-DD').add(days, 'day').format('YYYY-MM-DD');
+    this._keepInWindow(v, v.anchor);
     v.selDom = moment(v.anchor, 'YYYY-MM-DD').date(); // the day-of-month to hold across month paging
     v.selItem = null; // the item selection belongs to the day we just left
     this.render();
@@ -2525,6 +2608,7 @@ class CalendarRenderer {
   shiftSelectionMonth(months) {
     const v = this.view();
     this._revealMonthSel = true; // a keyboard move: keep its target on screen
+    v.gridStart = null; // month paging is month-aligned again
     const cur = moment(v.anchor || isoToday(), 'YYYY-MM-DD');
     const dom = v.selDom || cur.date();
     const m = cur.date(1).add(months, 'month');
@@ -2538,7 +2622,7 @@ class CalendarRenderer {
   renderMonth(body) {
     const v = this.view();
     const anchorM = moment(v.anchor, 'YYYY-MM-DD');
-    const { from, to } = rangeForView('month', anchorM);
+    const { from, to, custom } = this.monthWindow();
     const items = this.itemsInRange(from, to);
     // Multi-day all-day events draw as ONE continuous bar per week row (not a chip per day);
     // everything else stays a per-day chip.
@@ -2566,7 +2650,8 @@ class CalendarRenderer {
         const iso = d.format('YYYY-MM-DD');
         const count0 = dayCountLabel(itemsOnDay(byDay, spans, iso)); // "3 events · 1 task" — the hover/AT summary
         const cell = week.createDiv({
-          cls: 'dn-day' + (d.month() !== curMonth ? ' is-other' : '') + (iso === todayIso ? ' is-today' : '') + (iso === v.anchor ? ' is-sel' : '') + (v.pending && iso === v.pending.cursor ? ' is-cursor' : ''),
+          // Six weeks across two months have no "other" month to dim.
+          cls: 'dn-day' + (!custom && d.month() !== curMonth ? ' is-other' : '') + (iso === todayIso ? ' is-today' : '') + (iso === v.anchor ? ' is-sel' : '') + (v.pending && iso === v.pending.cursor ? ' is-cursor' : ''),
           attr: {
             role: 'gridcell',
             'aria-label': cap(d.format('dddd, D MMMM')) + (count0 ? ' — ' + count0 : ''),
@@ -2575,7 +2660,8 @@ class CalendarRenderer {
         });
         cell.dataset.iso = iso;
         const head = cell.createDiv({ cls: 'dn-day-head' });
-        head.createSpan({ cls: 'dn-day-num', text: String(d.date()) });
+        // …so name the month where it turns instead: "1 Feb".
+        head.createSpan({ cls: 'dn-day-num', text: custom && d.date() === 1 ? cap(d.format('D MMM')) : String(d.date()) });
         cell.addEventListener('click', (e) => {
           if (this.view().pending) { this.placePending(iso); return; } // placement mode: drop here
           if (e.target === cell || e.target === head) {
@@ -4641,6 +4727,11 @@ class CalendarSettingsModal extends Modal {
     let inherit = settings.dayStart == null && settings.dayEnd == null;
     let start = hours.dayStart, end = hours.dayEnd;
     let startSelect, endSelect;
+    let startAt = settings.startAt || '';
+    new Setting(contentEl).setName(t('startAt')).setDesc(t('startAtDesc')).addText((text) => {
+      text.inputEl.type = 'date';
+      text.setValue(startAt).onChange((value) => { startAt = value; });
+    });
     contentEl.createDiv({ cls: 'dn-quick-hint', text: t('hoursHint') });
     new Setting(contentEl).setName(t('inheritHours')).addToggle((toggle) => {
       toggle.setValue(inherit).onChange((value) => {
@@ -4668,11 +4759,16 @@ class CalendarSettingsModal extends Modal {
       if (!inherit && end <= start) { error.setText(t('invalidHours')); return; }
       const live = this.live();
       const current = live.model.settings;
-      const changed = inherit ? current.dayStart != null || current.dayEnd != null
-        : current.dayStart !== start || current.dayEnd !== end;
+      const okStart = /^\d{4}-\d{2}-\d{2}$/.test(startAt) && moment(startAt, 'YYYY-MM-DD', true).isValid() ? startAt : '';
+      const startChanged = okStart !== (current.startAt || '');
+      const changed = startChanged || (inherit ? current.dayStart != null || current.dayEnd != null
+        : current.dayStart !== start || current.dayEnd !== end);
+      // A new start date shows straight away, not only the next time the note opens.
+      if (startChanged && okStart) live.openAt(okStart, live.view());
       if (changed) live.mutate((m) => {
         if (inherit) { delete m.settings.dayStart; delete m.settings.dayEnd; }
         else { m.settings.dayStart = start; m.settings.dayEnd = end; }
+        if (okStart) m.settings.startAt = okStart; else delete m.settings.startAt;
       });
       this.close();
     });
