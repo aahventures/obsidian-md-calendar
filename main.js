@@ -835,8 +835,7 @@ function normalizeCal(parsed, defaults) {
   };
   if (!VIEW_CYCLE.includes(settings.view)) settings.view = 'month';
   // The date the calendar opens on (CalendarSettingsModal). Absent = today.
-  if (typeof rawSettings.startAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawSettings.startAt)
-    && moment(rawSettings.startAt, 'YYYY-MM-DD', true).isValid()) settings.startAt = rawSettings.startAt;
+  if (isIsoDate(rawSettings.startAt)) settings.startAt = rawSettings.startAt;
   for (const [key, min, max] of [['dayStart', 0, 23], ['dayEnd', 1, 24]]) {
     if (Number.isInteger(rawSettings[key]) && rawSettings[key] >= min && rawSettings[key] <= max) {
       settings[key] = rawSettings[key];
@@ -1076,7 +1075,7 @@ function rangeForView(view, anchorM) {
   // month grid: 6 weeks starting at the fdow-aligned cell before the 1st
   const monthStart = moment(a).startOf('month');
   const gridStart = moment(monthStart).subtract((monthStart.day() - fdow() + 7) % 7, 'day');
-  return { from: gridStart.format('YYYY-MM-DD'), to: moment(gridStart).add(41, 'day').format('YYYY-MM-DD') };
+  return { from: gridStart.format('YYYY-MM-DD'), to: windowEnd(gridStart.format('YYYY-MM-DD')) };
 }
 
 function weekStart(m) {
@@ -1094,6 +1093,12 @@ function periodLabel(view, anchorM) {
   }
   return cap(a.format('MMMM YYYY'));
 }
+
+// The last day of a six-week month grid that starts on `fromIso`.
+function windowEnd(fromIso) { return moment(fromIso, 'YYYY-MM-DD').add(41, 'day').format('YYYY-MM-DD'); }
+
+// A real calendar date written as YYYY-MM-DD (not just the shape: 2027-02-30 fails).
+function isIsoDate(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && moment(s, 'YYYY-MM-DD', true).isValid(); }
 
 // A month grid stepped off its month (any six weeks): "24 Jan – 6 Mar 2027".
 function rangeLabel(fromIso, toIso) {
@@ -1622,7 +1627,7 @@ class CalendarRenderer {
    * clamps live on .cm-sizer / .cm-content in Live Preview and .markdown-preview-sizer in reading
    * view, and this lets all of them give way at once whatever the structure — then hand the block
    * the pane's remaining height as --dn-fill. */
-  _applyFullBleed(tries) {
+  _applyFullBleed(tries, noFit) {
     if (this._destroyed) return;
     const on = this.plugin.fullBleedOn() && !this.parseError;
     this._clearBleed();
@@ -1646,7 +1651,8 @@ class CalendarRenderer {
       this._paneObserver = new ResizeObserver(() => this._fillHeight(pane, 0));
       this._paneObserver.observe(pane);
     }
-    this._fillHeight(pane, 0);
+    // render() passes noFit: it fits once at its end, against the view it has just built.
+    if (!noFit) this._fillHeight(pane, 0);
   }
 
   /* Drop the tags again. Another calendar in the SAME note may still want them, so leave them
@@ -1793,7 +1799,7 @@ class CalendarRenderer {
     if (this._monthRO) { this._monthRO.disconnect(); this._monthRO = null; }
     if (this._saveTimeScroll) this._saveTimeScroll();
     if (this._timeGridCleanup) this._timeGridCleanup();
-    this._applyFullBleed();
+    this._applyFullBleed(0, true); // classes now (renderMonth reads .is-full); the fit at the end
     if (this.parseError) return this.renderError();
     // Tear down any in-flight drag / placement-key listener first: el.empty() below detaches
     // their DOM but leaves the document-level listeners bound to dead nodes.
@@ -1806,6 +1812,7 @@ class CalendarRenderer {
     this.el.empty();
     this._timeGridInfo = null; // stale col refs die with el.empty(); renderTimeGrid rebuilds
     this._daySel = [];         // rebuilt by registerSelectable as the views draw the anchor day
+    this._daySelAll = null;    // fitted month: every item, before _fitMonthChips drops the hidden
     this.el.addClass('md-calendar');
     this.el.toggleClass('dn-placing', !!v.pending); // placement mode: pick a day/slot to drop
     this.buildHeader(this.el);
@@ -1830,10 +1837,10 @@ class CalendarRenderer {
 
     if (!v.pending && hadGridFocus && this._gridEl) this._gridEl.focus({ preventScroll: true });
 
-    // _applyFullBleed() above ran its first fit against the PREVIOUS view's DOM — it has to run
-    // first, so renderMonth sees .is-full — and the month's row cap depends on which view is
-    // up. Fit again now that the new one is built, or switching month ↔ week on a capped pane
-    // keeps the old height until the pane is resized.
+    // Fit to the pane now, against the view just built: the month's row cap depends on which
+    // view is up, so fitting before the build (with the previous view's DOM) kept the wrong
+    // height after switching month ↔ week on a capped pane.
+    this._revealMonthSel = false; // consumed by renderMonth, if it ran; never carried over
     if (this.el.hasClass('is-full')) {
       const pane = this.el.closest('.view-content');
       if (pane) this._fillHeight(pane, 0);
@@ -2089,8 +2096,8 @@ class CalendarRenderer {
 
   movePlaceCursor(days) {
     const v = this.view();
-    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     if (!v.pending) return;
+    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     const next = moment(v.pending.cursor || v.anchor || isoToday(), 'YYYY-MM-DD').add(days, 'day').format('YYYY-MM-DD');
     v.pending.cursor = next;
     v.pending.dom = moment(next, 'YYYY-MM-DD').date(); // remember the intended day-of-month for month paging
@@ -2101,8 +2108,8 @@ class CalendarRenderer {
 
   shiftPlaceMonth(months) {
     const v = this.view();
-    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     if (!v.pending) return;
+    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     const cur = moment(v.pending.cursor || v.anchor || isoToday(), 'YYYY-MM-DD');
     const dom = v.pending.dom || cur.date(); // the day-of-month the user wants to hold across months
     const m = cur.date(1).add(months, 'month');
@@ -2239,7 +2246,7 @@ class CalendarRenderer {
       else if (k === 'ArrowDown' || code === 'KeyS') { if (timeGrid) this.moveSelSlot(1); else this.moveSelection(7); }
       else if (code === 'KeyQ') this.switchView(-1);
       else if (code === 'KeyE') this.switchView(1);
-      else if (!timeGrid && v.view === 'month' && (k === '[' || k === ']')) this.stepWeek(k === '[' ? -1 : 1);
+      else if (!timeGrid && v.view === 'month' && (code === 'BracketLeft' || code === 'BracketRight')) this.stepWeek(code === 'BracketLeft' ? -1 : 1);
       else if (k === 'PageUp') this.shiftSelectionMonth(e.shiftKey ? -12 : -1);
       else if (k === 'PageDown') this.shiftSelectionMonth(e.shiftKey ? 12 : 1);
       else if (k === 'Home' || k === 'End') {
@@ -2322,6 +2329,7 @@ class CalendarRenderer {
     // Move the day cursor FIRST: dropDate re-renders, and the selection has to land where the
     // item went, not stay on the day it left.
     v.anchor = iso;
+    this._keepInWindow(v, iso); // a custom six-week window rolls with it, as with plain arrows
     v.selDom = moment(iso, 'YYYY-MM-DD').date();
     this.dropDate(it, it.date, iso, false);
     this._reselect(it.baseId);
@@ -2433,13 +2441,13 @@ class CalendarRenderer {
     }
   }
 
-  /* ‹Today› / the T key: the pointer jumps to today and the per-view state returns to its
-   * defaults — day-of-month paging memory cleared, the week/day slot cursor back on the
-   * all-day band — and the grid takes focus so the keys work immediately. */
-  /* Put the calendar on `iso`, with the month grid's six weeks starting at its week. */
+  /* Put the calendar on `iso`, with the month grid's six weeks starting at its week — the
+   * calendar's start date (settings.startAt). Resets the per-day state like goToDate. */
   openAt(iso, v) {
     v.anchor = iso;
     v.selDom = moment(iso, 'YYYY-MM-DD').date();
+    v.selSlot = null;
+    v.selItem = null;
     v.gridStart = weekStart(moment(iso, 'YYYY-MM-DD')).format('YYYY-MM-DD');
   }
 
@@ -2450,7 +2458,10 @@ class CalendarRenderer {
   monthWindow() {
     const v = this.view();
     if (v.gridStart) {
-      const to = moment(v.gridStart, 'YYYY-MM-DD').add(41, 'day').format('YYYY-MM-DD');
+      // Re-align to the first day of the week as it is NOW: the setting can change mid-session,
+      // and the weekday header always follows it.
+      v.gridStart = weekStart(moment(v.gridStart, 'YYYY-MM-DD')).format('YYYY-MM-DD');
+      const to = windowEnd(v.gridStart);
       if (v.anchor >= v.gridStart && v.anchor <= to) return { from: v.gridStart, to, custom: true };
       v.gridStart = null;
     }
@@ -2463,7 +2474,7 @@ class CalendarRenderer {
     if (v.view !== 'month' || !v.gridStart) return;
     const s = moment(v.gridStart, 'YYYY-MM-DD');
     while (iso < s.format('YYYY-MM-DD')) s.subtract(7, 'day');
-    while (iso > moment(s).add(41, 'day').format('YYYY-MM-DD')) s.add(7, 'day');
+    while (iso > windowEnd(s.format('YYYY-MM-DD'))) s.add(7, 'day');
     v.gridStart = s.format('YYYY-MM-DD');
   }
 
@@ -2472,8 +2483,9 @@ class CalendarRenderer {
   stepWeek(dir) {
     const v = this.view();
     const w = this.monthWindow();
+    this._revealMonthSel = true; // the six weeks moved: keep the selected day on screen
     v.gridStart = moment(w.from, 'YYYY-MM-DD').add(dir * 7, 'day').format('YYYY-MM-DD');
-    const to = moment(v.gridStart, 'YYYY-MM-DD').add(41, 'day').format('YYYY-MM-DD');
+    const to = windowEnd(v.gridStart);
     if (v.anchor < v.gridStart || v.anchor > to) {
       v.anchor = moment(v.anchor, 'YYYY-MM-DD').add(dir * 7, 'day').format('YYYY-MM-DD');
       v.selDom = moment(v.anchor, 'YYYY-MM-DD').date();
@@ -2482,6 +2494,9 @@ class CalendarRenderer {
     this.render();
   }
 
+  /* ‹Today› / the T key: the pointer jumps to today and the per-view state returns to its
+   * defaults — day-of-month paging memory cleared, the week/day slot cursor back on the
+   * all-day band — and the grid takes focus so the keys work immediately. */
   goToday() {
     this._forceTimeScroll = true;
     this._revealMonthSel = true; // today may be in a week scrolled out of a short month
@@ -2500,6 +2515,7 @@ class CalendarRenderer {
   goToDate(iso) {
     if (!iso) return;
     this._forceTimeScroll = true;
+    this._revealMonthSel = true; // the date may be in a week scrolled out of a short month
     const v = this.view();
     v.gridStart = null;
     v.anchor = iso;
@@ -2555,7 +2571,8 @@ class CalendarRenderer {
       n++;
     }
 
-    const lines = ['## ' + (this.model.title ? this.model.title + ' — ' : '') + periodLabel(v.view, anchorM), ''];
+    const heading = win && win.custom ? rangeLabel(win.from, win.to) : periodLabel(v.view, anchorM);
+    const lines = ['## ' + (this.model.title ? this.model.title + ' — ' : '') + heading, ''];
     for (const iso of Array.from(byDay.keys()).sort()) {
       lines.push('**' + cap(moment(iso, 'YYYY-MM-DD').format('dd, D MMMM')) + '**');
       for (const it of byDay.get(iso).sort(cmpItems)) lines.push(...this.itemMarkdown(it));
@@ -2715,9 +2732,15 @@ class CalendarRenderer {
     // Fitted: re-measure whenever the month changes size — the pane resizing, or the fit above
     // settling. The callback runs after layout and before paint, so nothing flickers, and hiding
     // chips can't resize the month (the rows' heights don't depend on them), so it can't loop.
-    if (fitted && typeof ResizeObserver === 'function') {
-      this._monthRO = new ResizeObserver(() => { if (!this._destroyed && grid.isConnected) this._fitMonthChips(grid); });
-      this._monthRO.observe(grid);
+    if (fitted) {
+      // Fit now, before render() marks the keyboard-selected item, so the selection list only
+      // ever counts items that are on screen (Tab can't land on one behind "+N more").
+      this._daySelAll = this._daySel.slice();
+      if (grid.isConnected && grid.clientHeight) this._fitMonthChips(grid, true);
+      if (typeof ResizeObserver === 'function') {
+        this._monthRO = new ResizeObserver(() => { if (!this._destroyed && grid.isConnected) this._fitMonthChips(grid); });
+        this._monthRO.observe(grid);
+      }
     }
     window.requestAnimationFrame(() => {
       if (this._destroyed || !grid.isConnected || grid.scrollHeight <= grid.clientHeight) return;
@@ -2731,7 +2754,7 @@ class CalendarRenderer {
    * rather than hiding a chip and re-reading per step, which reflowed the month hundreds of
    * times per resize frame. Titles get two lines when there is room for every chip the cap
    * allows; a day the ROOM limits drops to one line each, which fits more of them. */
-  _fitMonthChips(grid) {
+  _fitMonthChips(grid, duringRender) {
     const days = [];
     for (const box of grid.querySelectorAll('.dn-day-chips')) {
       const more = box.querySelector(':scope > .dn-more');
@@ -2774,13 +2797,19 @@ class CalendarRenderer {
       const hidden = d.total - d.shown;
       if (hidden) d.more.setText(t('more', hidden)); else d.more.style.display = 'none';
     }
-    // A keyboard-selected item now behind "+N more" can't be shown or acted on in place: drop
-    // back to day level (it is still one click away in the "+N more" list).
+    // Keyboard selection covers only what is on screen: rebuild the list from every item minus
+    // the hidden ones, keeping the selected item by identity. One that is now behind "+N more"
+    // drops back to day level (it is still one click away in the "+N more" list).
+    // During a render, v.selItem already counts in on-screen terms (the previous render's list),
+    // so the list only needs filtering; after a resize, re-find the selected item in the new one.
+    if (!this._daySelAll) return;
     const v = this.view();
-    const row = typeof v.selItem === 'number' ? (this._daySel || [])[v.selItem] : null;
-    if (row && row.el && row.el.style.display === 'none') {
-      row.el.removeClass('is-item-sel');
-      v.selItem = null;
+    const cur = !duringRender && typeof v.selItem === 'number' ? this._daySel[v.selItem] : null;
+    this._daySel = this._daySelAll.filter((r) => !(r.el && r.el.style.display === 'none'));
+    if (cur) {
+      const idx = this._daySel.indexOf(cur);
+      if (idx < 0) { if (cur.el) cur.el.removeClass('is-item-sel'); v.selItem = null; }
+      else v.selItem = idx;
     }
   }
 
@@ -4768,7 +4797,7 @@ class CalendarSettingsModal extends Modal {
       if (!inherit && end <= start) { error.setText(t('invalidHours')); return; }
       const live = this.live();
       const current = live.model.settings;
-      const okStart = /^\d{4}-\d{2}-\d{2}$/.test(startAt) && moment(startAt, 'YYYY-MM-DD', true).isValid() ? startAt : '';
+      const okStart = isIsoDate(startAt) ? startAt : '';
       const startChanged = okStart !== (current.startAt || '');
       const changed = startChanged || (inherit ? current.dayStart != null || current.dayEnd != null
         : current.dayStart !== start || current.dayEnd !== end);
