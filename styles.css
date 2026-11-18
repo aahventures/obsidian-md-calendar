@@ -765,6 +765,17 @@ body.dn-drag-active.dn-copy { cursor: copy; } /* Ctrl/Cmd held → drop leaves a
 .md-calendar.is-full .dn-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 /* month: the six week rows already share the space (flex: 1 1 0 each) — just give them some */
 .md-calendar.is-full .dn-month { flex: 1 1 auto; }
+/* The block's height is exact and clips (overflow: hidden above), so a pane too short for the
+ * six rows' own minimums (78px, or more for a busy week) used to lose the last week or two off
+ * the bottom with no way to reach them. Let the month scroll inside itself instead, like the
+ * hour grid does; the rows keep their minimums, so nothing about them changes. The weekday
+ * header reserves the same scrollbar gutter as the month so the columns stay lined up with
+ * classic (non-overlay) scrollbars.
+ * Desktop only: on mobile the block grows with its content (see below) and never clips. */
+body:not(.is-mobile) .md-calendar.is-full .dn-month { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+/* overflow: hidden strips the header's content-based minimum, so pin it or a short pane shrinks
+ * it along with the month (the same trap as .dn-tg-colhead below). */
+body:not(.is-mobile) .md-calendar.is-full .dn-month-wd { overflow: hidden; scrollbar-gutter: stable; flex: 0 0 auto; }
 /* week/day: the hour body takes the slack instead of stopping at 60vh. The day header and the
  * all-day row must NOT take part of that shrink themselves — .dn-tg-colhead's overflow:hidden
  * (kept for its scrollbar-gutter, see above) also strips its flexbox content-based minimum size,
