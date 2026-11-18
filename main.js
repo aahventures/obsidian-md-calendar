@@ -1903,12 +1903,17 @@ class CalendarRenderer {
     periodEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.openGoToDate(); } });
 
     const nav = head.createDiv({ cls: 'dn-nav' });
-    // Month view: Shift-click steps the six weeks by a week instead of a month.
+    // Month view: Shift-click steps the six weeks by a week instead of a month. Either way the
+    // grid gets keyboard focus back afterwards, as with Today: the redraw removes the button that
+    // was clicked, which would otherwise leave focus nowhere and the arrow/[ ] keys dead.
     const step = (dir) => (e) => {
-      if (v.view === 'month' && e && e.shiftKey) { this.stepWeek(dir); return; }
-      v.gridStart = null;
-      v.anchor = navStep(v.view, moment(v.anchor, 'YYYY-MM-DD'), dir).format('YYYY-MM-DD');
-      this.render();
+      if (v.view === 'month' && e && e.shiftKey) this.stepWeek(dir);
+      else {
+        v.gridStart = null;
+        v.anchor = navStep(v.view, moment(v.anchor, 'YYYY-MM-DD'), dir).format('YYYY-MM-DD');
+        this.render();
+      }
+      if (this._gridEl) this._gridEl.focus({ preventScroll: true });
     };
     const hint = v.view === 'month' ? ' · ' + t('shiftWeek') : '';
     this.iconBtn(nav, 'chevron-left', t('prev') + hint, step(-1));
