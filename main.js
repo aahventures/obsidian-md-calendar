@@ -2655,8 +2655,14 @@ class CalendarRenderer {
         const iso = d.format('YYYY-MM-DD');
         const count0 = dayCountLabel(itemsOnDay(byDay, spans, iso)); // "3 events · 1 task" — the hover/AT summary
         const cell = week.createDiv({
-          // Six weeks across two months have no "other" month to dim.
-          cls: 'dn-day' + (!custom && d.month() !== curMonth ? ' is-other' : '') + (iso === todayIso ? ' is-today' : '') + (iso === v.anchor ? ' is-sel' : '') + (v.pending && iso === v.pending.cursor ? ' is-cursor' : ''),
+          // Six weeks across two months have no "other" month to dim. Mark where one month
+          // meets the next instead: a line along the top of each month's first seven days
+          // (the days above them belong to the month before) and down the left of the 1st —
+          // together a staircase along the boundary.
+          cls: 'dn-day' + (!custom && d.month() !== curMonth ? ' is-other' : '')
+            + (custom && w > 0 && d.date() <= 7 ? ' is-mtop' : '') + (custom && c > 0 && d.date() === 1 ? ' is-mleft' : '')
+            + (custom && d.month() % 2 ? ' is-malt' : '') // alternate months shaded, so each reads as a block
+            + (iso === todayIso ? ' is-today' : '') + (iso === v.anchor ? ' is-sel' : '') + (v.pending && iso === v.pending.cursor ? ' is-cursor' : ''),
           attr: {
             role: 'gridcell',
             'aria-label': cap(d.format('dddd, D MMMM')) + (count0 ? ' — ' + count0 : ''),
@@ -2665,8 +2671,9 @@ class CalendarRenderer {
         });
         cell.dataset.iso = iso;
         const head = cell.createDiv({ cls: 'dn-day-head' });
-        // …so name the month where it turns instead: "1 Feb".
-        head.createSpan({ cls: 'dn-day-num', text: custom && d.date() === 1 ? cap(d.format('D MMM')) : String(d.date()) });
+        // …and name the month where the window starts and wherever it turns: "17 Jan", "1 Feb".
+        const named = custom && (d.date() === 1 || (w === 0 && c === 0));
+        head.createSpan({ cls: 'dn-day-num' + (named ? ' is-mlabel' : ''), text: named ? cap(d.format('D MMM')) : String(d.date()) });
         cell.addEventListener('click', (e) => {
           if (this.view().pending) { this.placePending(iso); return; } // placement mode: drop here
           if (e.target === cell || e.target === head) {
