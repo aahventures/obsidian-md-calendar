@@ -1664,8 +1664,8 @@ class CalendarRenderer {
 
   /* One step of the fit, repeated only while it still moves. Growing the block reflows what is
    * inside it, so the second reading can differ from the first; three passes are plenty and the
-   * "already there" test below stops it dead when the block refuses to shrink any further
-   * (a month grid has six rows of minimum height and will not go below them). */
+   * "already there" test below stops it dead when the block refuses to move any further
+   * (it is already at MIN_FILL, or a pass lands on the height it already has). */
   _settleFill(scroller, pass) {
     if (this._destroyed || !this.el.isConnected) return;
     const cs = getComputedStyle(scroller);
@@ -2020,6 +2020,7 @@ class CalendarRenderer {
 
   movePlaceCursor(days) {
     const v = this.view();
+    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     if (!v.pending) return;
     const next = moment(v.pending.cursor || v.anchor || isoToday(), 'YYYY-MM-DD').add(days, 'day').format('YYYY-MM-DD');
     v.pending.cursor = next;
@@ -2031,6 +2032,7 @@ class CalendarRenderer {
 
   shiftPlaceMonth(months) {
     const v = this.view();
+    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     if (!v.pending) return;
     const cur = moment(v.pending.cursor || v.anchor || isoToday(), 'YYYY-MM-DD');
     const dom = v.pending.dom || cur.date(); // the day-of-month the user wants to hold across months
@@ -2353,7 +2355,11 @@ class CalendarRenderer {
         if (lines[i].trim()) { this._dedicated = false; break; }
       }
     }
-    if (this._dedicated) this._gridEl.focus({ preventScroll: true });
+    if (this._dedicated) {
+      this._gridEl.focus({ preventScroll: true });
+      // The selection is live now; on a short pane it may sit in a week scrolled out of view.
+      if (this.view().view === 'month') this._revealInMonth(this._gridEl);
+    }
   }
 
   /* ‹Today› / the T key: the pointer jumps to today and the per-view state returns to its
@@ -2361,6 +2367,7 @@ class CalendarRenderer {
    * all-day band — and the grid takes focus so the keys work immediately. */
   goToday() {
     this._forceTimeScroll = true;
+    this._revealMonthSel = true; // today may be in a week scrolled out of a short month
     const v = this.view();
     v.anchor = isoToday();
     v.selDom = null;
@@ -2473,6 +2480,7 @@ class CalendarRenderer {
 
   moveSelection(days) {
     const v = this.view();
+    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     v.anchor = moment(v.anchor || isoToday(), 'YYYY-MM-DD').add(days, 'day').format('YYYY-MM-DD');
     v.selDom = moment(v.anchor, 'YYYY-MM-DD').date(); // the day-of-month to hold across month paging
     v.selItem = null; // the item selection belongs to the day we just left
@@ -2481,6 +2489,7 @@ class CalendarRenderer {
 
   shiftSelectionMonth(months) {
     const v = this.view();
+    this._revealMonthSel = true; // a keyboard move: keep its target on screen
     const cur = moment(v.anchor || isoToday(), 'YYYY-MM-DD');
     const dom = v.selDom || cur.date();
     const m = cur.date(1).add(months, 'month');
@@ -2543,10 +2552,11 @@ class CalendarRenderer {
 
         const chips = cell.createDiv({ cls: 'dn-day-chips' });
         const dayItems = byDay.get(iso) || [];
-        // A cap, not a measurement. The row is `minmax(78px, 1fr)` inside a month with no
-        // height of its own, so a cell GROWS to whatever it holds — there is no clipped
-        // height to measure "what fits" against, and one busy day would stretch the whole
-        // week. The cap is a setting instead, so a big screen can simply raise it.
+        // A cap, not a measurement. A row never shrinks below what its cells hold — in a
+        // month with no height of its own the cell simply GROWS, and in a full-pane month the
+        // month scrolls instead (styles.css) — so there is no clipped height to measure
+        // "what fits" against, and one busy day would stretch the whole week. The cap is a
+        // setting instead, so a big screen can simply raise it.
         const max = Math.max(1, Math.min(20, Number(this.plugin.settings.monthChips) || 4));
         dayItems.slice(0, max).forEach((it) => this.buildChip(chips, it, 'date'));
         if (dayItems.length > max) {
@@ -2557,6 +2567,32 @@ class CalendarRenderer {
       }
       this.buildWeekBars(week, weekStartM, spans);
     }
+    // On a short full-pane note the month scrolls inside itself (styles.css). Every keypress
+    // and checkbox redraws it, and a persisted edit rebuilds the renderer, so the position lives
+    // in the view state — like the time grid's timeScroll — and only within the same month.
+    grid.addEventListener('scroll', () => { v.monthScroll = { from, top: grid.scrollTop }; }, { passive: true });
+    const reveal = this._revealMonthSel;
+    this._revealMonthSel = false;
+    // After layout, and only when the month actually scrolls — on a pane tall enough for it,
+    // which is the usual case, this costs nothing.
+    window.requestAnimationFrame(() => {
+      if (this._destroyed || !grid.isConnected || grid.scrollHeight <= grid.clientHeight) return;
+      if (v.monthScroll && v.monthScroll.from === from) grid.scrollTop = v.monthScroll.top;
+      if (reveal) this._revealInMonth(grid);
+    });
+  }
+
+  /* Scroll the month — and only the month, never the note — so the selected day (or the
+   * placement cursor) is in view. Asked for by the keyboard moves only (_revealMonthSel): a
+   * click-driven redraw must not pull the month away from where the user is working. A cell
+   * taller than the month's view shows its top, where the day number is. */
+  _revealInMonth(grid) {
+    const cell = grid.querySelector('.dn-day.is-cursor') || grid.querySelector('.dn-day.is-sel');
+    if (!cell) return;
+    const r = cell.getBoundingClientRect();
+    const g = grid.getBoundingClientRect();
+    if (r.top < g.top || r.height > g.height) grid.scrollTop -= g.top - r.top;
+    else if (r.bottom > g.bottom) grid.scrollTop += r.bottom - g.bottom;
   }
 
   /* "+N more": the rest of the day, right there. It used to throw you into day view, which
@@ -3409,7 +3445,12 @@ class CalendarRenderer {
         const sel = kind === 'timed'
           ? '.dn-tg-col[data-iso]'
           : '.dn-day[data-iso], .dn-tg-allday-cell[data-iso], .dn-tg-col[data-iso], .dn-ag2-cell[data-iso]';
+        // A month that scrolls inside itself still lays out the days scrolled out of view, over
+        // the header or below the pane; only the part of it on screen can take a drop.
+        const month = this.el.querySelector('.dn-month');
+        const mr = month && month.scrollHeight > month.clientHeight ? month.getBoundingClientRect() : null;
         for (const c of this.el.querySelectorAll(sel)) {
+          if (mr && c.classList.contains('dn-day') && (y < mr.top || y > mr.bottom)) continue;
           const r = c.getBoundingClientRect();
           if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return c;
         }
