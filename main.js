@@ -35,6 +35,13 @@ const { EditorState } = require('@codemirror/state');
  * both fit; past this point the grid stops being usable, so the note keeps its scrollbar
  * instead of the calendar being crushed. */
 const MIN_FILL = 340;
+/* Full-pane month on desktop: the weeks share the height equally. A row never goes below
+ * MONTH_ROW_MIN (the day number plus one line — keep in step with styles.css; below it the
+ * month scrolls), and never gets taller than MONTH_ROW_MAX_RATIO times its own width — on a
+ * tall, narrow pane (a vertical monitor) the calendar ends early instead of stretching the days
+ * into thin columns. */
+const MONTH_ROW_MIN = 44;
+const MONTH_ROW_MAX_RATIO = 1;
 
 
 /* ------------------------------------------------------------------ *
@@ -1401,6 +1408,7 @@ class CalendarRenderer {
     this.abortDrags();
     if (this._placeCleanup) this._placeCleanup();
     if (this._paneObserver) { this._paneObserver.disconnect(); this._paneObserver = null; }
+    if (this._monthRO) { this._monthRO.disconnect(); this._monthRO = null; }
     this.plugin.allRenderers.delete(this);
     // After the delete above, so a sibling calendar in this note is the only thing that can
     // keep the note widened — a note that no longer renders one goes back to normal width.
@@ -1692,11 +1700,26 @@ class CalendarRenderer {
     const viewBottom = inner - sr.top;
     const blockBottom = tr.bottom - sr.top + scroller.scrollTop + foot;
     const delta = Math.round(viewBottom - blockBottom - after);
-    if (Math.abs(delta) <= 1) return;
-    const next = Math.max(MIN_FILL, Math.round(this.el.getBoundingClientRect().height + delta));
+    const height = this.el.getBoundingClientRect().height;
+    const next = Math.min(Math.max(MIN_FILL, Math.round(height + delta)), this._monthFillCap(height));
+    if (Math.abs(next - height) <= 1) return;
     if (next === Math.round(parseFloat(this.el.style.getPropertyValue('--dn-fill')) || 0)) return;
     this.el.style.setProperty('--dn-fill', next + 'px');
     if (pass < 3) window.requestAnimationFrame(() => this._settleFill(scroller, pass + 1));
+  }
+
+  /* The tallest the block may be while it shows a fitted month: every week at its maximum height
+   * (MONTH_ROW_MAX_RATIO times the day's width) plus everything around the weeks. Infinity for
+   * any other view. Read off the current layout: the block is `height` tall and the month
+   * inside it is grid.clientHeight, so the rest of the block is the difference. */
+  _monthFillCap(height) {
+    const grid = this.el.querySelector('.dn-month.is-fit');
+    const cell = grid && grid.querySelector('.dn-day');
+    if (!cell || !grid.clientHeight) return Infinity;
+    const weeks = grid.querySelectorAll(':scope > .dn-mweek').length;
+    const gap = parseFloat(getComputedStyle(grid).rowGap) || 0;
+    const rowMax = Math.max(MONTH_ROW_MIN, cell.getBoundingClientRect().width * MONTH_ROW_MAX_RATIO);
+    return Math.round(height - grid.clientHeight + weeks * rowMax + (weeks - 1) * gap);
   }
 
   /* The block as the note's flow sees it: walk out to whatever sits directly in the note's own
@@ -1746,6 +1769,7 @@ class CalendarRenderer {
 
   /* ---- top-level render ---- */
   render() {
+    if (this._monthRO) { this._monthRO.disconnect(); this._monthRO = null; }
     if (this._saveTimeScroll) this._saveTimeScroll();
     if (this._timeGridCleanup) this._timeGridCleanup();
     this._applyFullBleed();
@@ -2514,7 +2538,11 @@ class CalendarRenderer {
     const wd = body.createDiv({ cls: 'dn-month-wd' });
     for (let i = 0; i < 7; i++) wd.createSpan({ cls: 'dn-wd', text: wmin[(fdow() + i) % 7] });
 
-    const grid = body.createDiv({ cls: 'dn-month' });
+    // Full-pane on desktop the month has a height of its own: the weeks share it equally and each
+    // day shows as many events as fit (measured, _fitMonthChips). Otherwise the month has no
+    // height, a day grows to what it holds, and the monthChips cap decides (below).
+    const fitted = this.el.hasClass('is-full') && !IS_MOBILE();
+    const grid = body.createDiv({ cls: 'dn-month' + (fitted ? ' is-fit' : '') });
     this.armGridKeys(grid, 'grid');
     const gridStart = moment(from, 'YYYY-MM-DD');
     const curMonth = anchorM.month();
@@ -2552,17 +2580,20 @@ class CalendarRenderer {
 
         const chips = cell.createDiv({ cls: 'dn-day-chips' });
         const dayItems = byDay.get(iso) || [];
-        // A cap, not a measurement. A row never shrinks below what its cells hold — in a
-        // month with no height of its own the cell simply GROWS, and in a full-pane month the
-        // month scrolls instead (styles.css) — so there is no clipped height to measure
-        // "what fits" against, and one busy day would stretch the whole week. The cap is a
-        // setting instead, so a big screen can simply raise it.
+        // Without a height of its own, a cap, not a measurement: the cell GROWS to whatever it
+        // holds, so there is no clipped height to measure "what fits" against, and one busy day
+        // would stretch the whole week. The cap is a setting, so a big screen can raise it.
+        // Fitted, the cap is only the most a day shows; _fitMonthChips() hides what the row has
+        // no room for and keeps "+N more" — there whenever the day has anything — counting it.
         const max = Math.max(1, Math.min(20, Number(this.plugin.settings.monthChips) || 4));
         dayItems.slice(0, max).forEach((it) => this.buildChip(chips, it, 'date'));
-        if (dayItems.length > max) {
-          const hidden = dayItems.slice(max);
-          const more = chips.createDiv({ cls: 'dn-more', text: t('more', hidden.length) });
-          more.addEventListener('click', (e) => { e.stopPropagation(); this.openDayList(iso, hidden, e); });
+        if (fitted ? dayItems.length : dayItems.length > max) {
+          const more = chips.createDiv({ cls: 'dn-more' });
+          more._dnItems = dayItems;
+          more._dnShown = Math.min(max, dayItems.length);
+          const hidden = dayItems.length - more._dnShown;
+          if (hidden) more.setText(t('more', hidden)); else more.style.display = 'none';
+          more.addEventListener('click', (e) => { e.stopPropagation(); this.openDayList(iso, dayItems.slice(more._dnShown), e); });
         }
       }
       this.buildWeekBars(week, weekStartM, spans);
@@ -2575,11 +2606,52 @@ class CalendarRenderer {
     this._revealMonthSel = false;
     // After layout, and only when the month actually scrolls — on a pane tall enough for it,
     // which is the usual case, this costs nothing.
+    // Fitted: re-measure whenever the month changes size — the pane resizing, or the fit above
+    // settling. The callback runs after layout and before paint, so nothing flickers, and hiding
+    // chips can't resize the month (the rows' heights don't depend on them), so it can't loop.
+    if (fitted && typeof ResizeObserver === 'function') {
+      this._monthRO = new ResizeObserver(() => { if (!this._destroyed && grid.isConnected) this._fitMonthChips(grid); });
+      this._monthRO.observe(grid);
+    }
     window.requestAnimationFrame(() => {
       if (this._destroyed || !grid.isConnected || grid.scrollHeight <= grid.clientHeight) return;
       if (v.monthScroll && v.monthScroll.from === from) grid.scrollTop = v.monthScroll.top;
       if (reveal) this._revealInMonth(grid);
     });
+  }
+
+  /* Fitted month: in each day, show the events its row has room for and count the rest in
+   * "+N more". Starts from everything the cap allows and hides from the end until the chips
+   * box (which shrinks to the room left under the day number and any multi-day lanes) no
+   * longer overflows. */
+  _fitMonthChips(grid) {
+    for (const box of grid.querySelectorAll('.dn-day-chips')) {
+      const more = box.querySelector(':scope > .dn-more');
+      if (!more || !more._dnItems) continue;
+      const chips = box.querySelectorAll(':scope > .dn-chip');
+      const total = more._dnItems.length;
+      let shown = chips.length;
+      const sync = () => {
+        more._dnShown = shown;
+        const hidden = total - shown;
+        more.style.display = hidden ? '' : 'none';
+        if (hidden) more.setText(t('more', hidden));
+      };
+      const fit = () => {
+        shown = chips.length;
+        chips.forEach((c) => c.style.removeProperty('display'));
+        sync();
+        while (shown > 0 && box.scrollHeight > box.clientHeight + 1) {
+          chips[--shown].style.display = 'none';
+          sync();
+        }
+      };
+      // Titles get two lines when there is room for everything; a day that can't show it all
+      // drops to one line each, which fits more of them.
+      box.removeClass('is-tight');
+      fit();
+      if (shown < total) { box.addClass('is-tight'); fit(); }
+    }
   }
 
   /* Scroll the month — and only the month, never the note — so the selected day (or the

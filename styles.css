@@ -773,6 +773,17 @@ body.dn-drag-active.dn-copy { cursor: copy; } /* Ctrl/Cmd held → drop leaves a
  * classic (non-overlay) scrollbars.
  * Desktop only: on mobile the block grows with its content (see below) and never clips. */
 body:not(.is-mobile) .md-calendar.is-full .dn-month { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+/* Fitted month (renderMonth sets .is-fit — full pane, desktop): the weeks share the height
+ * equally instead of each growing to what it holds; each day shows what fits and counts the
+ * rest in "+N more" (_fitMonthChips). 44px = MONTH_ROW_MIN in main.js: the day number plus one
+ * line; below it the month scrolls. The row clips, so multi-day lanes it has no room for can't
+ * draw over the next week. */
+body:not(.is-mobile) .md-calendar.is-full .dn-month.is-fit .dn-mweek { grid-auto-rows: minmax(0, 1fr); min-height: 44px; overflow: hidden; }
+body:not(.is-mobile) .md-calendar.is-full .dn-month.is-fit .dn-day { min-height: 0; }
+/* Chips keep their natural height (their overflow: hidden would otherwise let them squash to
+ * fit), so a day that has too many overflows its chips box and _fitMonthChips can see it. */
+body:not(.is-mobile) .md-calendar.is-full .dn-month.is-fit .dn-day-chips > * { flex-shrink: 0; }
+body:not(.is-mobile) .md-calendar.is-full .dn-month.is-fit .dn-day-chips.is-tight .dn-chip-title { -webkit-line-clamp: 1; }
 /* overflow: hidden strips the header's content-based minimum, so pin it or a short pane shrinks
  * it along with the month (the same trap as .dn-tg-colhead below). */
 body:not(.is-mobile) .md-calendar.is-full .dn-month-wd { overflow: hidden; scrollbar-gutter: stable; flex: 0 0 auto; }
