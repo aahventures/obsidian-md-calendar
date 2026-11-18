@@ -62,7 +62,7 @@ const STRINGS = {
     today: 'Today',
     prev: 'Previous',
     next: 'Next',
-    shiftWeek: 'Shift-click or [ ]: by a week',
+    shiftWeek: 'Shift-click, press and hold, or [ ]: by a week',
     startAt: 'Opens at',
     startAtDesc: 'The date this calendar opens on; empty opens on today. In month view the six weeks start with that week.',
     timePlaceholder: 'time — e.g. 1530, or 15-18 for a range',
@@ -235,7 +235,7 @@ const STRINGS = {
     today: 'Сегодня',
     prev: 'Назад',
     next: 'Вперёд',
-    shiftWeek: 'Shift+клик или [ ]: на неделю',
+    shiftWeek: 'Shift+клик, долгое нажатие или [ ]: на неделю',
     startAt: 'Открывается на',
     startAtDesc: 'Дата, на которой открывается календарь; пусто — сегодня. В месяце шесть недель начинаются с этой недели.',
     timePlaceholder: 'время — напр. 1530 или 15-18 для диапазона',
@@ -1918,6 +1918,8 @@ class CalendarRenderer {
     // grid gets keyboard focus back afterwards, as with Today: the redraw removes the button that
     // was clicked, which would otherwise leave focus nowhere and the arrow/[ ] keys dead.
     const step = (dir) => (e) => {
+      // The click that ends a long press (below) already stepped a week: don't also page a month.
+      if (this._heldNav && Date.now() - this._heldNav < 800) { this._heldNav = 0; return; }
       if (isWindowed(v.view) && e && e.shiftKey) this.stepWeek(dir);
       else {
         v.gridStart = null;
@@ -1927,10 +1929,11 @@ class CalendarRenderer {
       if (this._gridEl) this._gridEl.focus({ preventScroll: true });
     };
     const hint = isWindowed(v.view) ? ' · ' + t('shiftWeek') : '';
-    this.iconBtn(nav, 'chevron-left', t('prev') + hint, step(-1));
+    const prevBtn = this.iconBtn(nav, 'chevron-left', t('prev') + hint, step(-1));
     const todayBtn = nav.createEl('button', { cls: 'dn-today', text: t('today') });
     todayBtn.addEventListener('click', () => this.goToday());
-    this.iconBtn(nav, 'chevron-right', t('next') + hint, step(1));
+    const nextBtn = this.iconBtn(nav, 'chevron-right', t('next') + hint, step(1));
+    if (isWindowed(v.view)) { this._holdForWeek(prevBtn, -1); this._holdForWeek(nextBtn, 1); }
 
     // A sibling of .dn-nav, not nested inside .dn-head-right: on a narrow pane the two need to
     // share the first wrapped row while the icon buttons below follow together on a row of
@@ -1991,6 +1994,28 @@ class CalendarRenderer {
       const idx = (m.orphans || []).findIndex((o) => JSON.stringify(o) === key);
       if (idx >= 0) m.orphans.splice(idx, 1);
     });
+  }
+
+  /* Touch has no Shift key: press and hold ‹ or › to step the six weeks by a week. The redraw
+   * replaces the button under the finger, so the click that ends the press is recognised by
+   * time (this._heldNav, checked in buildHeader's step) rather than by element. */
+  _holdForWeek(btn, dir) {
+    let timer = null;
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    btn.addClass('dn-holdable');
+    btn.addEventListener('pointerdown', (e) => {
+      if (e.button) return; // primary button / touch / pen only
+      cancel();
+      timer = setTimeout(() => {
+        timer = null;
+        if (this._destroyed) return;
+        this._heldNav = Date.now();
+        this.stepWeek(dir);
+        if (this._gridEl) this._gridEl.focus({ preventScroll: true });
+      }, 500);
+    });
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) btn.addEventListener(ev, cancel);
+    btn.addEventListener('contextmenu', (e) => e.preventDefault()); // a held press is not a right-click
   }
 
   iconBtn(parent, icon, label, onClick, on) {

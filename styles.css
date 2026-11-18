@@ -260,6 +260,8 @@
 /* Mini calendar off its month (monthWindow): shade alternate months, name the month small in
  * the corner of its first day — the number keeps its place and its today/selected circle. */
 .dn-ag2-cell { position: relative; }
+/* ‹ › can be held to step a week (_holdForWeek): no text selection or iOS callout on the hold. */
+.dn-icon-btn.dn-holdable { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
 .dn-ag2-cell.is-malt:not(.is-sel) { background: color-mix(in srgb, var(--background-secondary) 60%, var(--background-primary)); }
 .dn-ag2-cell.is-malt:not(.is-sel):hover { background: var(--background-modifier-hover); }
 .dn-ag2-grid.is-custom .dn-ag2-cell { padding-top: 12px; } /* every cell, so the rows stay even */
