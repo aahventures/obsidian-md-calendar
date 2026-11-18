@@ -2655,13 +2655,10 @@ class CalendarRenderer {
         const iso = d.format('YYYY-MM-DD');
         const count0 = dayCountLabel(itemsOnDay(byDay, spans, iso)); // "3 events · 1 task" — the hover/AT summary
         const cell = week.createDiv({
-          // Six weeks across two months have no "other" month to dim. Mark where one month
-          // meets the next instead: a line along the top of each month's first seven days
-          // (the days above them belong to the month before) and down the left of the 1st —
-          // together a staircase along the boundary.
+          // Six weeks across two months have no "other" month to dim. Shade alternate months
+          // instead, so each reads as a block.
           cls: 'dn-day' + (!custom && d.month() !== curMonth ? ' is-other' : '')
-            + (custom && w > 0 && d.date() <= 7 ? ' is-mtop' : '') + (custom && c > 0 && d.date() === 1 ? ' is-mleft' : '')
-            + (custom && d.month() % 2 ? ' is-malt' : '') // alternate months shaded, so each reads as a block
+            + (custom && d.month() % 2 ? ' is-malt' : '')
             + (iso === todayIso ? ' is-today' : '') + (iso === v.anchor ? ' is-sel' : '') + (v.pending && iso === v.pending.cursor ? ' is-cursor' : ''),
           attr: {
             role: 'gridcell',
